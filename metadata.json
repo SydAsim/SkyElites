@@ -1,0 +1,6 @@
+{
+  "name": "SkyElite Private Jets",
+  "description": "Premium private jet landing page featuring a beautifully integrated looping and muted CloudFront video background.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
