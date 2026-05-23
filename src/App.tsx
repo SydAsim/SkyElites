@@ -1,4 +1,4 @@
-import { useState, FormEvent, useRef } from 'react';
+import { useState, FormEvent, useRef, useEffect } from 'react';
 import { Menu, X, ArrowRight, ArrowDownRight, Shield, Clock, Users, Calendar, MapPin, Volume2, VolumeX, Sparkles, CheckCircle, ChevronDown, Check, ArrowUpRight } from 'lucide-react';
 import { motion, AnimatePresence } from 'motion/react';
 
@@ -15,6 +15,9 @@ export default function App() {
   const [activeFaq, setActiveFaq] = useState<number | null>(null);
   
   const videoRef = useRef<HTMLVideoElement>(null);
+  const audioCtxRef = useRef<AudioContext | null>(null);
+  const mainGainRef = useRef<GainNode | null>(null);
+  const activeSourcesRef = useRef<any[]>([]);
 
   const [bookingForm, setBookingForm] = useState({
     departure: '',
@@ -40,19 +43,210 @@ export default function App() {
     }
   };
 
-  const toggleMuted = () => {
-    if (videoRef.current) {
-      const nextMuted = !isMuted;
-      videoRef.current.muted = nextMuted;
-      setIsMuted(nextMuted);
-      // Ensure the video is playing when unmuting
-      if (!nextMuted) {
-        videoRef.current.play().catch((err) => {
-          console.log("Audio play prevented by browser restrictions until user click interaction", err);
-        });
+  const stopJetEngineSound = () => {
+    const ctx = audioCtxRef.current;
+    const mainGain = mainGainRef.current;
+    
+    // Smoothly fade out sound first
+    if (ctx && mainGain) {
+      try {
+        mainGain.gain.cancelScheduledValues(ctx.currentTime);
+        mainGain.gain.setValueAtTime(mainGain.gain.value, ctx.currentTime);
+        mainGain.gain.linearRampToValueAtTime(0.001, ctx.currentTime + 0.35);
+      } catch (err) {}
+    }
+
+    // Stop and discharge all running oscillators and noise generators after the fade
+    setTimeout(() => {
+      activeSourcesRef.current.forEach(source => {
+        try {
+          source.stop();
+        } catch (e) {}
+        try {
+          source.disconnect();
+        } catch (e) {}
+      });
+      activeSourcesRef.current = [];
+    }, 380);
+  };
+
+  const initJetEngineSound = () => {
+    try {
+      // Create context if not exists or closed
+      if (!audioCtxRef.current || audioCtxRef.current.state === 'closed') {
+        const AudioContextClass = window.AudioContext || (window as any).webkitAudioContext;
+        if (AudioContextClass) {
+          audioCtxRef.current = new AudioContextClass();
+        }
       }
+
+      const ctx = audioCtxRef.current;
+      if (!ctx) return;
+
+      if (ctx.state === 'suspended') {
+        ctx.resume().catch(() => {});
+      }
+
+      // Safeguard: Stop and clear any existing nodes first
+      activeSourcesRef.current.forEach(src => {
+        try { src.stop(); } catch (e) {}
+        try { src.disconnect(); } catch (e) {}
+      });
+      activeSourcesRef.current = [];
+
+      // Create main output master gain
+      const mainGain = ctx.createGain();
+      mainGain.gain.setValueAtTime(0.001, ctx.currentTime);
+      mainGain.connect(ctx.destination);
+      mainGainRef.current = mainGain;
+
+      // 1. DENSE CABIN NOISE (Pinkish brown noise for deep air friction)
+      const bufferSize = ctx.sampleRate * 2;
+      const noiseBuffer = ctx.createBuffer(1, bufferSize, ctx.sampleRate);
+      const output = noiseBuffer.getChannelData(0);
+      let lastOut = 0.0;
+      for (let i = 0; i < bufferSize; i++) {
+        const white = Math.random() * 2 - 1;
+        // Brownian noise integration representing realistic heavy cabin air pressure
+        output[i] = (lastOut + (0.02 * white)) / 1.02;
+        lastOut = output[i];
+        output[i] *= 4.5; // Amplified
+      }
+
+      const airSource = ctx.createBufferSource();
+      airSource.buffer = noiseBuffer;
+      airSource.loop = true;
+
+      const airFilter = ctx.createBiquadFilter();
+      airFilter.type = 'lowpass';
+      airFilter.frequency.setValueAtTime(140, ctx.currentTime);
+      airFilter.frequency.exponentialRampToValueAtTime(320, ctx.currentTime + 3.0); // Spools air velocity up
+
+      const airGain = ctx.createGain();
+      airGain.gain.setValueAtTime(0.75, ctx.currentTime);
+
+      airSource.connect(airFilter);
+      airFilter.connect(airGain);
+      airGain.connect(mainGain);
+      activeSourcesRef.current.push(airSource);
+
+      // 2. HIGH PRESSURIZED CABIN WIND (White noise bandpass filtered for wind currents)
+      const windBuffer = ctx.createBuffer(1, bufferSize, ctx.sampleRate);
+      const windOutput = windBuffer.getChannelData(0);
+      for (let i = 0; i < bufferSize; i++) {
+        windOutput[i] = Math.random() * 2 - 1;
+      }
+
+      const windSource = ctx.createBufferSource();
+      windSource.buffer = windBuffer;
+      windSource.loop = true;
+
+      const windFilter = ctx.createBiquadFilter();
+      windFilter.type = 'bandpass';
+      windFilter.frequency.setValueAtTime(280, ctx.currentTime);
+      windFilter.frequency.exponentialRampToValueAtTime(650, ctx.currentTime + 3.0); // sweep up
+      windFilter.Q.setValueAtTime(1.5, ctx.currentTime);
+
+      const windGainNode = ctx.createGain();
+      windGainNode.gain.setValueAtTime(0.28, ctx.currentTime);
+
+      windSource.connect(windFilter);
+      windFilter.connect(windGainNode);
+      windGainNode.connect(mainGain);
+      activeSourcesRef.current.push(windSource);
+
+      // 3. LOW THROATY COMBUSTION FLAME RUMBLE
+      const lowRumble = ctx.createOscillator();
+      lowRumble.type = 'triangle';
+      lowRumble.frequency.setValueAtTime(35, ctx.currentTime);
+      lowRumble.frequency.exponentialRampToValueAtTime(82, ctx.currentTime + 3.2);
+
+      const rumbleGain = ctx.createGain();
+      rumbleGain.gain.setValueAtTime(0.6, ctx.currentTime);
+
+      lowRumble.connect(rumbleGain);
+      rumbleGain.connect(mainGain);
+      activeSourcesRef.current.push(lowRumble);
+
+      // 4. TWIN TURBOFAN JET ENGINES (Slightly de-tuned dual sines for heavy stereo flanging)
+      const turbine1 = ctx.createOscillator();
+      turbine1.type = 'sine';
+      turbine1.frequency.setValueAtTime(105, ctx.currentTime);
+      turbine1.frequency.exponentialRampToValueAtTime(312, ctx.currentTime + 3.2); // Spools to engine cruising speed
+
+      const turbine2 = ctx.createOscillator();
+      turbine2.type = 'sine';
+      turbine2.frequency.setValueAtTime(106.5, ctx.currentTime);
+      turbine2.frequency.exponentialRampToValueAtTime(316.5, ctx.currentTime + 3.2); // Harmonically beats against turbine 1
+
+      const turbineGain = ctx.createGain();
+      turbineGain.gain.setValueAtTime(0.48, ctx.currentTime);
+
+      turbine1.connect(turbineGain);
+      turbine2.connect(turbineGain);
+      turbineGain.connect(mainGain);
+      activeSourcesRef.current.push(turbine1);
+      activeSourcesRef.current.push(turbine2);
+
+      // 5. HIGH-STAGE TURBINE WHISTLE (The sharp realistic metallic blade whine)
+      const sharpWhistle = ctx.createOscillator();
+      sharpWhistle.type = 'sine';
+      sharpWhistle.frequency.setValueAtTime(260, ctx.currentTime);
+      sharpWhistle.frequency.exponentialRampToValueAtTime(740, ctx.currentTime + 3.5); // Ramps up to that premium real whistling tone!
+
+      const whistleGain = ctx.createGain();
+      whistleGain.gain.setValueAtTime(0.18, ctx.currentTime);
+
+      sharpWhistle.connect(whistleGain);
+      whistleGain.connect(mainGain);
+      activeSourcesRef.current.push(sharpWhistle);
+
+      // Start all synthesizers
+      airSource.start(0);
+      windSource.start(0);
+      lowRumble.start(0);
+      turbine1.start(0);
+      turbine2.start(0);
+      sharpWhistle.start(0);
+
+      // Gracefully glide the master volume up as the jet spools up
+      mainGain.gain.linearRampToValueAtTime(0.85, ctx.currentTime + 2.5);
+    } catch (err) {
+      console.error("Failed to synthesize premium jet engine acoustics:", err);
     }
   };
+
+  const toggleMuted = () => {
+    const nextMuted = !isMuted;
+    
+    // Manage video mute
+    if (videoRef.current) {
+      videoRef.current.muted = nextMuted;
+      if (!nextMuted) {
+        videoRef.current.play().catch(() => {});
+      }
+    }
+
+    // Manage Web Audio API private jet engine sound
+    if (!nextMuted) {
+      // Unmuting: start synthesis spool up
+      initJetEngineSound();
+    } else {
+      // Muting: ramp down volume and silence immediately
+      stopJetEngineSound();
+    }
+
+    setIsMuted(nextMuted);
+  };
+
+  // Sound Cleanup Effect hook
+  useEffect(() => {
+    return () => {
+      if (audioCtxRef.current) {
+        audioCtxRef.current.close().catch(() => {});
+      }
+    };
+  }, []);
 
   const handleBookingSubmit = (e: FormEvent) => {
     e.preventDefault();
